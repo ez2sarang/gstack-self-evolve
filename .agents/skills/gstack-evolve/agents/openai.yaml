@@ -1,0 +1,6 @@
+interface:
+  display_name: "gstack-evolve"
+  short_description: "Self-diagnosis and improvement for gstack skills. Analyzes performance data, identifies failure patterns, and..."
+  default_prompt: "Use gstack-evolve for this task."
+policy:
+  allow_implicit_invocation: true

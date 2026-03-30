@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# gstack-analytics-health — skill health dashboard from local telemetry
+#
+# Reads ~/.gstack/analytics/skill-usage.jsonl and shows:
+#   - Per-skill success/error rates
+#   - Average duration trends
+#   - User verdict distribution (v:2 only)
+#   - Common failure reasons
+#
+# Usage: gstack-analytics-health [--days N] [--skill NAME]
+set -uo pipefail
+
+STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+JSONL_FILE="$STATE_DIR/analytics/skill-usage.jsonl"
+DAYS=30
+FILTER_SKILL=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --days)  DAYS="$2"; shift 2 ;;
+    --skill) FILTER_SKILL="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ ! -f "$JSONL_FILE" ]; then
+  echo "No telemetry data found at $JSONL_FILE"
+  exit 0
+fi
+
+# Calculate cutoff timestamp
+if command -v gdate >/dev/null 2>&1; then
+  CUTOFF=$(gdate -u -d "$DAYS days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+elif date -v-1d +%Y 2>/dev/null | grep -q '^[0-9]'; then
+  CUTOFF=$(date -u -v-${DAYS}d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+else
+  CUTOFF=$(date -u -d "$DAYS days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+fi
+
+echo ""
+echo "Skill Health Dashboard (last ${DAYS}d)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Use awk to parse JSONL and compute stats
+awk -v cutoff="$CUTOFF" -v filter="$FILTER_SKILL" '
+BEGIN {
+  # Initialize
+}
+{
+  # Parse JSON fields manually (lightweight, no jq dependency)
+  line = $0
+
+  # Extract skill
+  skill = ""
+  if (match(line, /"skill":"[^"]*"/)) {
+    skill = substr(line, RSTART+9, RLENGTH-10)
+  }
+  if (skill == "" || skill == "gstack") next  # skip bare preamble entries
+  if (filter != "" && skill != filter) next
+
+  # Extract timestamp
+  ts = ""
+  if (match(line, /"ts":"[^"]*"/)) {
+    ts = substr(line, RSTART+6, RLENGTH-7)
+  }
+  if (cutoff != "" && ts != "" && ts < cutoff) next
+
+  # Extract outcome
+  outcome = "unknown"
+  if (match(line, /"outcome":"[^"]*"/)) {
+    outcome = substr(line, RSTART+11, RLENGTH-12)
+  }
+
+  # Extract duration
+  dur = 0
+  if (match(line, /"duration_s":[0-9]+/)) {
+    dur = substr(line, RSTART+13, RLENGTH-13) + 0
+  } else if (match(line, /"duration_s":"[0-9]+"/)) {
+    dur = substr(line, RSTART+14, RLENGTH-15) + 0
+  }
+
+  # Count
+  total[skill]++
+  if (outcome == "success") success[skill]++
+  else if (outcome == "error") errors[skill]++
+  else if (outcome == "abort") aborts[skill]++
+
+  duration_sum[skill] += dur
+
+  # v:2 fields
+  if (match(line, /"user_verdict":"[^"]*"/)) {
+    verdict = substr(line, RSTART+16, RLENGTH-17)
+    verdicts[skill SUBSEP verdict]++
+    verdict_total[skill]++
+  }
+
+  if (match(line, /"bugs_found":[0-9]+/)) {
+    bf = substr(line, RSTART+13, RLENGTH-13) + 0
+    bugs_found_sum[skill] += bf
+    bugs_found_count[skill]++
+  }
+
+  if (match(line, /"bugs_fixed":[0-9]+/)) {
+    bx = substr(line, RSTART+13, RLENGTH-13) + 0
+    bugs_fixed_sum[skill] += bx
+  }
+
+  if (match(line, /"failure_reason":"[^"]*"/)) {
+    fr = substr(line, RSTART+18, RLENGTH-19)
+    fail_reasons[fr]++
+  }
+}
+END {
+  # Sort skills by total runs (descending)
+  n = 0
+  for (s in total) {
+    n++
+    skills[n] = s
+  }
+
+  # Simple bubble sort by total
+  for (i = 1; i <= n; i++) {
+    for (j = i+1; j <= n; j++) {
+      if (total[skills[j]] > total[skills[i]]) {
+        tmp = skills[i]; skills[i] = skills[j]; skills[j] = tmp
+      }
+    }
+  }
+
+  # Print per-skill stats
+  printf "  %-16s %6s %6s %6s %8s\n", "SKILL", "RUNS", "OK%", "ERR", "AVG DUR"
+  printf "  %-16s %6s %6s %6s %8s\n", "────────────────", "──────", "──────", "──────", "────────"
+
+  for (i = 1; i <= n; i++) {
+    s = skills[i]
+    ok_pct = (total[s] > 0) ? int(((success[s]+0) / total[s]) * 100) : 0
+    avg_dur = (total[s] > 0) ? int(duration_sum[s] / total[s]) : 0
+
+    # Format duration
+    if (avg_dur >= 60) {
+      dur_str = int(avg_dur / 60) "m" (avg_dur % 60) "s"
+    } else {
+      dur_str = avg_dur "s"
+    }
+
+    printf "  /%-15s %6d %5d%% %6d %8s\n", s, total[s], ok_pct, errors[s]+0, dur_str
+  }
+
+  # Print failure reasons if any
+  fr_count = 0
+  for (r in fail_reasons) fr_count++
+
+  if (fr_count > 0) {
+    printf "\n  Common Failures:\n"
+    for (r in fail_reasons) {
+      printf "    %s (%d)\n", r, fail_reasons[r]
+    }
+  }
+
+  total_events = 0
+  for (s in total) total_events += total[s]
+  printf "\n  Total events: %d across %d skills\n", total_events, n
+}
+' "$JSONL_FILE"
+
+echo ""

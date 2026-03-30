@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# gstack-detect-project — auto-detect project tech stack and write profile
+#
+# Reads package.json, tsconfig, Cargo.toml, go.mod, etc. to detect:
+#   framework, language, test runner, CSS, package manager, DB, deploy target
+#
+# Writes to ~/.gstack/learned/project-profiles/{slug}.json
+#
+# Usage: gstack-detect-project [--dir PATH]
+set -uo pipefail
+
+DIR="${1:-.}"
+STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+PROFILES_DIR="$STATE_DIR/learned/project-profiles"
+
+# Get repo slug
+SLUG=""
+if command -v git >/dev/null 2>&1; then
+  SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-' 2>/dev/null || true)
+fi
+if [ -z "$SLUG" ]; then
+  SLUG=$(basename "$(pwd)")
+fi
+
+# Detect framework and language
+FRAMEWORK=""
+FRAMEWORK_VERSION=""
+LANGUAGE=""
+CSS=""
+TEST_RUNNER=""
+PKG_MANAGER=""
+DB=""
+DEPLOY=""
+AUTH=""
+
+# ─── JavaScript/TypeScript ecosystem ───────────────────────
+if [ -f "$DIR/package.json" ]; then
+  PKG=$(cat "$DIR/package.json" 2>/dev/null)
+
+  # Language
+  if [ -f "$DIR/tsconfig.json" ]; then
+    LANGUAGE="typescript"
+  else
+    LANGUAGE="javascript"
+  fi
+
+  # Package manager
+  if [ -f "$DIR/bun.lock" ] || [ -f "$DIR/bun.lockb" ]; then
+    PKG_MANAGER="bun"
+  elif [ -f "$DIR/pnpm-lock.yaml" ]; then
+    PKG_MANAGER="pnpm"
+  elif [ -f "$DIR/yarn.lock" ]; then
+    PKG_MANAGER="yarn"
+  else
+    PKG_MANAGER="npm"
+  fi
+
+  # Framework detection
+  if echo "$PKG" | grep -q '"next"'; then
+    FRAMEWORK="next"
+    FRAMEWORK_VERSION=$(echo "$PKG" | grep -o '"next": *"[^"]*"' | head -1 | sed 's/.*"\([0-9][^"]*\)".*/\1/')
+  elif echo "$PKG" | grep -q '"nuxt"'; then
+    FRAMEWORK="nuxt"
+  elif echo "$PKG" | grep -q '"@remix-run/'; then
+    FRAMEWORK="remix"
+  elif echo "$PKG" | grep -q '"svelte"'; then
+    FRAMEWORK="svelte"
+  elif echo "$PKG" | grep -q '"vue"'; then
+    FRAMEWORK="vue"
+  elif echo "$PKG" | grep -q '"react"'; then
+    FRAMEWORK="react"
+  elif echo "$PKG" | grep -q '"express"'; then
+    FRAMEWORK="express"
+  elif echo "$PKG" | grep -q '"fastify"'; then
+    FRAMEWORK="fastify"
+  elif echo "$PKG" | grep -q '"hono"'; then
+    FRAMEWORK="hono"
+  fi
+
+  # Test runner
+  if echo "$PKG" | grep -q '"vitest"'; then
+    TEST_RUNNER="vitest"
+  elif echo "$PKG" | grep -q '"jest"'; then
+    TEST_RUNNER="jest"
+  elif echo "$PKG" | grep -q '"playwright"'; then
+    TEST_RUNNER="playwright"
+  elif echo "$PKG" | grep -q '"cypress"'; then
+    TEST_RUNNER="cypress"
+  fi
+
+  # CSS
+  if echo "$PKG" | grep -q '"tailwindcss"'; then
+    CSS="tailwind"
+  elif [ -f "$DIR/src/styles" ] || echo "$PKG" | grep -q '"styled-components"'; then
+    CSS="styled-components"
+  fi
+
+  # Database
+  if echo "$PKG" | grep -q '"@supabase/supabase-js"'; then
+    DB="supabase"
+    AUTH="supabase-auth"
+  elif echo "$PKG" | grep -q '"prisma"'; then
+    DB="prisma"
+  elif echo "$PKG" | grep -q '"drizzle-orm"'; then
+    DB="drizzle"
+  elif echo "$PKG" | grep -q '"mongoose"'; then
+    DB="mongodb"
+  elif echo "$PKG" | grep -q '"pg"' || echo "$PKG" | grep -q '"postgres"'; then
+    DB="postgresql"
+  fi
+
+  # Deploy target
+  if [ -f "$DIR/vercel.json" ] || [ -f "$DIR/.vercel" ]; then
+    DEPLOY="vercel"
+  elif [ -f "$DIR/netlify.toml" ]; then
+    DEPLOY="netlify"
+  elif [ -f "$DIR/fly.toml" ]; then
+    DEPLOY="fly"
+  elif [ -f "$DIR/render.yaml" ]; then
+    DEPLOY="render"
+  elif [ -f "$DIR/Dockerfile" ]; then
+    DEPLOY="docker"
+  fi
+fi
+
+# ─── Rust ──────────────────────────────────────────────────
+if [ -f "$DIR/Cargo.toml" ]; then
+  LANGUAGE="rust"
+  PKG_MANAGER="cargo"
+fi
+
+# ─── Go ────────────────────────────────────────────────────
+if [ -f "$DIR/go.mod" ]; then
+  LANGUAGE="go"
+  PKG_MANAGER="go"
+fi
+
+# ─── Python ────────────────────────────────────────────────
+if [ -f "$DIR/requirements.txt" ] || [ -f "$DIR/pyproject.toml" ] || [ -f "$DIR/setup.py" ]; then
+  LANGUAGE="python"
+  if [ -f "$DIR/pyproject.toml" ] && grep -q "poetry" "$DIR/pyproject.toml" 2>/dev/null; then
+    PKG_MANAGER="poetry"
+  elif [ -f "$DIR/Pipfile" ]; then
+    PKG_MANAGER="pipenv"
+  else
+    PKG_MANAGER="pip"
+  fi
+  if grep -q "django" "$DIR/requirements.txt" 2>/dev/null || grep -q "django" "$DIR/pyproject.toml" 2>/dev/null; then
+    FRAMEWORK="django"
+  elif grep -q "flask" "$DIR/requirements.txt" 2>/dev/null; then
+    FRAMEWORK="flask"
+  elif grep -q "fastapi" "$DIR/requirements.txt" 2>/dev/null; then
+    FRAMEWORK="fastapi"
+  fi
+  if grep -q "pytest" "$DIR/requirements.txt" 2>/dev/null || grep -q "pytest" "$DIR/pyproject.toml" 2>/dev/null; then
+    TEST_RUNNER="pytest"
+  fi
+fi
+
+# ─── Ruby ──────────────────────────────────────────────────
+if [ -f "$DIR/Gemfile" ]; then
+  LANGUAGE="ruby"
+  PKG_MANAGER="bundler"
+  if grep -q "rails" "$DIR/Gemfile" 2>/dev/null; then
+    FRAMEWORK="rails"
+  fi
+  if grep -q "rspec" "$DIR/Gemfile" 2>/dev/null; then
+    TEST_RUNNER="rspec"
+  fi
+fi
+
+# ─── Write profile ─────────────────────────────────────────
+mkdir -p "$PROFILES_DIR"
+
+TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Build JSON
+cat > "$PROFILES_DIR/$SLUG.json" <<EOJSON
+{
+  "repo_slug": "$SLUG",
+  "detected_at": "$TS_NOW",
+  "updated_at": "$TS_NOW",
+  "tech_stack": {
+    "framework": $([ -n "$FRAMEWORK" ] && echo "\"$FRAMEWORK\"" || echo "null"),
+    "framework_version": $([ -n "$FRAMEWORK_VERSION" ] && echo "\"$FRAMEWORK_VERSION\"" || echo "null"),
+    "language": $([ -n "$LANGUAGE" ] && echo "\"$LANGUAGE\"" || echo "null"),
+    "css": $([ -n "$CSS" ] && echo "\"$CSS\"" || echo "null"),
+    "test_runner": $([ -n "$TEST_RUNNER" ] && echo "\"$TEST_RUNNER\"" || echo "null"),
+    "package_manager": $([ -n "$PKG_MANAGER" ] && echo "\"$PKG_MANAGER\"" || echo "null"),
+    "db": $([ -n "$DB" ] && echo "\"$DB\"" || echo "null")
+  },
+  "auth_type": $([ -n "$AUTH" ] && echo "\"$AUTH\"" || echo "null"),
+  "deploy_target": $([ -n "$DEPLOY" ] && echo "\"$DEPLOY\"" || echo "null"),
+  "common_issues": [],
+  "skill_notes": {}
+}
+EOJSON
+
+echo "PROFILE_WRITTEN: $PROFILES_DIR/$SLUG.json"
+echo "SLUG=$SLUG LANG=$LANGUAGE FW=$FRAMEWORK PM=$PKG_MANAGER DB=$DB"

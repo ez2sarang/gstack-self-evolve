@@ -1,0 +1,171 @@
+<!-- AUTO-GENERATED from SKILL.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+
+# /evolve — Self-Evolution Engine
+
+Analyzes gstack skill performance data and proposes concrete improvements.
+Inspired by MiniMax M27's self-evolution agent: analyze failure trajectories,
+form hypotheses, modify scaffolds, evaluate results.
+
+## Phase 1: Diagnose
+
+Read all available performance data. Run these commands:
+
+```bash
+# Telemetry history (last 500 events)
+tail -500 ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null
+
+# Contributor logs (filed bug reports)
+ls ~/.gstack/contributor-logs/ 2>/dev/null
+for f in ~/.gstack/contributor-logs/*.md; do [ -f "$f" ] && cat "$f"; done 2>/dev/null
+
+# Learned patterns and anti-patterns
+cat ~/.gstack/learned/patterns.jsonl 2>/dev/null
+cat ~/.gstack/learned/anti-patterns.jsonl 2>/dev/null
+
+# Evolution history (prior improvements)
+cat ~/.gstack/analytics/evolutions.jsonl 2>/dev/null
+```
+
+Compute per-skill health metrics:
+
+| Metric | How to Calculate |
+|--------|------------------|
+| Success rate | `outcome=success / total` |
+| Avg duration | `sum(duration_s) / count` per skill |
+| Error frequency | group by `error_class` |
+| User verdict | `accepted / (accepted+rejected+modified)` (v:2 only) |
+| Retry rate | `avg(retry_count)` (v:2 only) |
+| Anti-pattern hits | count of anti-patterns per skill |
+
+Rank skills by **improvement opportunity**:
+```
+opportunity = (1 - success_rate) * total_runs
+```
+
+Highest opportunity = most impact from fixing.
+
+Output a **Diagnosis Report** table:
+
+```
+SKILL           RUNS  OK%   ERR  AVG DUR  OPPORTUNITY
+─────────────────────────────────────────────────────
+/qa              30   60%   12    5m12s    12.0
+/review          25   88%    3    3m05s     3.0
+/investigate     15   73%    4    12m30s    4.0
+/ship            20   95%    1    7m20s     1.0
+```
+
+## Phase 2: Hypothesize
+
+For the top 3 skills with highest opportunity:
+
+1. Read the skill's SKILL.md.tmpl:
+```bash
+cat ~/.claude/skills/gstack/{skill}/SKILL.md.tmpl
+```
+
+2. Read contributor logs mentioning that skill
+3. Cross-reference error_class and failure_reason with template instructions
+4. Read anti-patterns for that skill
+
+Generate hypotheses. Each hypothesis must:
+- Name the specific problem
+- Cite data (e.g., "12 of 20 /qa errors have error_class=timeout")
+- Propose a root cause
+- Estimate fixability (high/medium/low)
+
+Format:
+```
+HYPOTHESIS 1: /qa timeout rate is 60%
+  DATA: 12/20 errors are timeout, anti-pattern "dev server not running" appears 8x
+  ROOT CAUSE: /qa doesn't check if dev server is running before starting tests
+  FIXABILITY: high — add a pre-check step in Phase 1
+  CONFIDENCE: 0.85
+
+HYPOTHESIS 2: /review false positive rate on SQL checks
+  DATA: 5 contributor logs mention "flagged harmless ORM query"
+  ROOT CAUSE: SQL safety regex matches ORM-generated queries
+  FIXABILITY: medium — need allowlist for common ORMs
+  CONFIDENCE: 0.70
+```
+
+## Phase 3: Propose
+
+For each hypothesis, generate a concrete fix. Fixes can be:
+
+| Type | Target | Example |
+|------|--------|---------|
+| **A) Template mod** | `{skill}/SKILL.md.tmpl` | Add a pre-check step, change a prompt |
+| **B) Resolver code** | `scripts/resolvers/*.ts` | New shared function |
+| **C) CLI tool** | `bin/*` | New utility script |
+| **D) Learning** | `~/.gstack/learned/` | Record anti-pattern for future sessions |
+
+For each proposal:
+1. Show the exact file to modify
+2. Show a unified diff of the change
+3. State expected impact: "Should reduce X from Y% to Z%"
+4. Rate risk: low/medium/high
+
+Use AskUserQuestion for each proposal:
+
+Options:
+- A) Apply this change
+- B) Skip
+- C) Modify the proposal
+
+Only proceed with approved proposals.
+
+## Phase 4: Validate
+
+For each approved proposal:
+
+1. Apply the change (Edit the target file)
+2. If the target is a .tmpl file, regenerate:
+```bash
+cd ~/.claude/skills/gstack && bun run gen:skill-docs 2>/dev/null || echo "SKIP: gen:skill-docs not available in this context"
+```
+3. Run validation:
+```bash
+cd ~/.claude/skills/gstack && bun test 2>/dev/null || echo "SKIP: tests not available"
+```
+4. If validation passes, log the evolution:
+```bash
+mkdir -p ~/.gstack/analytics
+echo '{"ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","target_skill":"SKILL","hypothesis":"HYPO_SUMMARY","change_type":"TYPE","file_modified":"FILE","validated":true,"expected_impact":"IMPACT"}' >> ~/.gstack/analytics/evolutions.jsonl
+```
+5. If validation fails, revert and report
+
+## Output: Evolution Report
+
+After all phases, summarize:
+
+```
+Evolution Report
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Diagnosed: N skills analyzed
+  Hypotheses: M formed, K with high confidence
+  Proposals: P presented, Q approved
+  Applied: R changes validated
+
+  Changes:
+    1. /qa — added dev server pre-check (expected: -40% timeout)
+    2. /review — added ORM allowlist (expected: -60% false positives)
+
+  Next /evolve run will measure actual impact vs predictions.
+```
+
+## Self-Reference Loop
+
+When `/evolve` runs again later, it checks `evolutions.jsonl`:
+- Compare pre-evolution and post-evolution metrics for changed skills
+- If improvement < 50% of predicted: flag as "needs revision"
+- If improvement >= predicted: increase confidence in that fix pattern
+- This creates the M27-style recursive improvement loop
+
+## Tips
+
+- Run `/evolve` after accumulating at least 20 skill runs for meaningful data
+- Start with high-opportunity, low-risk fixes
+- The evolution log creates accountability: each change is tracked
+- If a change makes things worse, the next `/evolve` run will detect the regression

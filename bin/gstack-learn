@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# gstack-learn — manage cross-session learning data
+#
+# Usage:
+#   gstack-learn add-pattern --skill qa --pattern "Always run bun dev first" --tags auth,dev
+#   gstack-learn add-anti-pattern --skill investigate --anti-pattern "Don't use git bisect"
+#   gstack-learn detect-project
+#   gstack-learn list [--skill NAME]
+#   gstack-learn forget <id>
+#   gstack-learn gc
+set -uo pipefail
+
+STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+LEARNED_DIR="$STATE_DIR/learned"
+PATTERNS_FILE="$LEARNED_DIR/patterns.jsonl"
+ANTI_FILE="$LEARNED_DIR/anti-patterns.jsonl"
+GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+CMD="${1:-help}"
+shift 2>/dev/null || true
+
+# Get repo slug
+get_slug() {
+  git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-' 2>/dev/null || basename "$(pwd)"
+}
+
+gen_id() {
+  local prefix="$1"
+  printf '%s-%s' "$prefix" "$(od -An -tx1 -N6 /dev/urandom 2>/dev/null | tr -d ' \n')"
+}
+
+case "$CMD" in
+  add-pattern)
+    SKILL="" PATTERN="" TAGS="" EVIDENCE=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --skill)    SKILL="$2"; shift 2 ;;
+        --pattern)  PATTERN="$2"; shift 2 ;;
+        --tags)     TAGS="$2"; shift 2 ;;
+        --evidence) EVIDENCE="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -z "$SKILL" ] || [ -z "$PATTERN" ] && { echo "Usage: gstack-learn add-pattern --skill NAME --pattern TEXT [--tags TAG1,TAG2] [--evidence TEXT]"; exit 1; }
+
+    SLUG=$(get_slug)
+    ID=$(gen_id "pat")
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    mkdir -p "$LEARNED_DIR"
+    printf '{"id":"%s","ts":"%s","repo_slug":"%s","skill":"%s","pattern":"%s","evidence":"%s","confidence":0.85,"last_used":"%s","use_count":1,"tags":[%s]}\n' \
+      "$ID" "$TS" "$SLUG" "$SKILL" "$PATTERN" "$EVIDENCE" "$TS" \
+      "$(echo "$TAGS" | sed 's/,/","/g;s/^/"/;s/$/"/' | sed 's/^""$//;s/""//' )" >> "$PATTERNS_FILE"
+    echo "ADDED pattern $ID for /$SKILL: $PATTERN"
+    ;;
+
+  add-anti-pattern)
+    SKILL="" ANTI="" TAGS="" EVIDENCE=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --skill)        SKILL="$2"; shift 2 ;;
+        --anti-pattern) ANTI="$2"; shift 2 ;;
+        --tags)         TAGS="$2"; shift 2 ;;
+        --evidence)     EVIDENCE="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -z "$SKILL" ] || [ -z "$ANTI" ] && { echo "Usage: gstack-learn add-anti-pattern --skill NAME --anti-pattern TEXT [--tags TAG1,TAG2]"; exit 1; }
+
+    SLUG=$(get_slug)
+    ID=$(gen_id "anti")
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    mkdir -p "$LEARNED_DIR"
+    printf '{"id":"%s","ts":"%s","repo_slug":"%s","skill":"%s","anti_pattern":"%s","evidence":"%s","confidence":0.9,"last_seen":"%s","occurrence_count":1,"tags":[%s]}\n' \
+      "$ID" "$TS" "$SLUG" "$SKILL" "$ANTI" "$EVIDENCE" "$TS" \
+      "$(echo "$TAGS" | sed 's/,/","/g;s/^/"/;s/$/"/' | sed 's/^""$//;s/""//' )" >> "$ANTI_FILE"
+    echo "ADDED anti-pattern $ID for /$SKILL: $ANTI"
+    ;;
+
+  detect-project)
+    exec "$GSTACK_DIR/bin/gstack-detect-project" "${@}"
+    ;;
+
+  list)
+    FILTER_SKILL=""
+    [ $# -gt 0 ] && [ "$1" = "--skill" ] && FILTER_SKILL="$2"
+    SLUG=$(get_slug)
+
+    echo "Learnings for $SLUG${FILTER_SKILL:+ (/$FILTER_SKILL)}"
+    echo "───────────────────────────────────────"
+
+    if [ -f "$PATTERNS_FILE" ]; then
+      echo ""
+      echo "Patterns:"
+      if [ -n "$FILTER_SKILL" ]; then
+        grep "\"repo_slug\":\"$SLUG\"" "$PATTERNS_FILE" 2>/dev/null | grep "\"skill\":\"$FILTER_SKILL\"" || echo "  (none)"
+      else
+        grep "\"repo_slug\":\"$SLUG\"" "$PATTERNS_FILE" 2>/dev/null || echo "  (none)"
+      fi
+    fi
+
+    if [ -f "$ANTI_FILE" ]; then
+      echo ""
+      echo "Anti-patterns:"
+      if [ -n "$FILTER_SKILL" ]; then
+        grep "\"repo_slug\":\"$SLUG\"" "$ANTI_FILE" 2>/dev/null | grep "\"skill\":\"$FILTER_SKILL\"" || echo "  (none)"
+      else
+        grep "\"repo_slug\":\"$SLUG\"" "$ANTI_FILE" 2>/dev/null || echo "  (none)"
+      fi
+    fi
+
+    PROFILE="$LEARNED_DIR/project-profiles/$SLUG.json"
+    if [ -f "$PROFILE" ]; then
+      echo ""
+      echo "Project profile:"
+      cat "$PROFILE"
+    fi
+    ;;
+
+  forget)
+    ID="${1:-}"
+    [ -z "$ID" ] && { echo "Usage: gstack-learn forget <pattern-id>"; exit 1; }
+
+    # Set confidence to 0 in both files
+    for F in "$PATTERNS_FILE" "$ANTI_FILE"; do
+      [ -f "$F" ] || continue
+      if grep -q "\"id\":\"$ID\"" "$F"; then
+        sed -i.bak "s/\"id\":\"$ID\"/\"id\":\"$ID\",\"confidence\":0/" "$F" 2>/dev/null || true
+        rm -f "$F.bak"
+        echo "FORGOTTEN: $ID (confidence set to 0)"
+        exit 0
+      fi
+    done
+    echo "Not found: $ID"
+    ;;
+
+  gc)
+    echo "Running garbage collection..."
+    REMOVED=0
+    for F in "$PATTERNS_FILE" "$ANTI_FILE"; do
+      [ -f "$F" ] || continue
+      BEFORE=$(wc -l < "$F" | tr -d ' ')
+      # Remove lines with confidence explicitly set to 0
+      grep -v '"confidence":0[,}]' "$F" > "$F.tmp" 2>/dev/null || true
+      mv "$F.tmp" "$F"
+      AFTER=$(wc -l < "$F" | tr -d ' ')
+      REMOVED=$((REMOVED + BEFORE - AFTER))
+    done
+    echo "Removed $REMOVED stale entries"
+    ;;
+
+  help|*)
+    echo "gstack-learn — manage cross-session learning data"
+    echo ""
+    echo "Commands:"
+    echo "  add-pattern      Add a successful approach"
+    echo "  add-anti-pattern Add a failed approach to avoid"
+    echo "  detect-project   Auto-detect and save project profile"
+    echo "  list             Show learnings for current repo"
+    echo "  forget <id>      Mark a learning as forgotten"
+    echo "  gc               Remove stale entries"
+    ;;
+esac
