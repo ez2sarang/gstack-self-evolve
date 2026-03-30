@@ -405,3 +405,184 @@ describe("evolve loop dry-run", () => {
     expect(output).toContain("Sync upstream: false");
   });
 });
+
+// ─── Patch templates tests ───────────────────────────────
+
+describe("patch templates", () => {
+  const { getPatchContent, getAvailablePatches } = require("../lib/patch-templates");
+
+  test("qa:timeout returns port-check patch", () => {
+    const patch = getPatchContent("qa", "timeout", "4/8 timeout errors", "test-1");
+    expect(patch).not.toBeNull();
+    expect(patch!.skill).toBe("qa");
+    expect(patch!.title).toContain("Dev Server");
+    expect(patch!.content).toContain("curl");
+    expect(patch!.content).toContain("4/8 timeout errors");
+  });
+
+  test("investigate:scope_exceeded returns time-budget patch", () => {
+    const patch = getPatchContent("investigate", "scope_exceeded", "2/4 exceeded", "test-2");
+    expect(patch).not.toBeNull();
+    expect(patch!.title).toContain("Time-Budget");
+    expect(patch!.content).toContain("10 minutes");
+  });
+
+  test("review:false_positive returns ORM patch", () => {
+    const patch = getPatchContent("review", "false_positive", "5/13 FP", "test-3");
+    expect(patch).not.toBeNull();
+    expect(patch!.title).toContain("ORM");
+    expect(patch!.content).toContain("prisma");
+  });
+
+  test("unknown combo falls back to generic", () => {
+    const patch = getPatchContent("qa", "general_failure", "1/10 errors", "test-4");
+    expect(patch).not.toBeNull();
+    expect(patch!.title).toContain("Error Recovery");
+  });
+
+  test("completely unknown error returns null", () => {
+    const patch = getPatchContent("qa", "never_heard_of_this", "0/0", "test-5");
+    expect(patch).toBeNull();
+  });
+
+  test("getAvailablePatches returns known error types", () => {
+    const patches = getAvailablePatches();
+    expect(patches).toContain("timeout");
+    expect(patches).toContain("scope_exceeded");
+    expect(patches).toContain("false_positive");
+  });
+});
+
+// ─── gstack-evolve-apply tests ───────────────────────────
+
+describe("gstack-evolve-apply", () => {
+  const applyScript = join(process.cwd(), "bin/gstack-evolve-apply");
+
+  test("write + deploy creates patch file and injects into SKILL.md", () => {
+    // Set up fake skill directory
+    const skillsDir = join(tmp, "skills");
+    const skillDir = join(skillsDir, "qa");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# QA Skill\n\nSome content here.\n");
+
+    const result = Bun.spawnSync({
+      cmd: ["bash", applyScript,
+        "--skill", "qa",
+        "--patch-id", "test-patch-1",
+        "--content", "### Test Patch\n\nThis is a test improvement.",
+        "--confidence", "0.90"],
+      env: {
+        ...process.env,
+        GSTACK_STATE_DIR: tmp,
+        GSTACK_SKILLS_DIR: skillsDir,
+      },
+    });
+
+    const output = result.stdout.toString();
+    expect(output).toContain("WRITTEN");
+    expect(output).toContain("DEPLOYED");
+
+    // Check patch file was created
+    const patchFile = join(tmp, "skill-patches", "qa.md");
+    expect(Bun.file(patchFile).size).toBeGreaterThan(0);
+    const patchContent = readFileSync(patchFile, "utf-8");
+    expect(patchContent).toContain("<!-- patch:test-patch-1");
+    expect(patchContent).toContain("### Test Patch");
+
+    // Check SKILL.md was patched
+    const skillMd = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+    expect(skillMd).toContain("<!-- EVOLVE-PATCHES START -->");
+    expect(skillMd).toContain("### Test Patch");
+    expect(skillMd).toContain("<!-- EVOLVE-PATCHES END -->");
+    // Original content preserved
+    expect(skillMd).toContain("# QA Skill");
+  });
+
+  test("remove strips patch and cleans SKILL.md", () => {
+    const skillsDir = join(tmp, "skills-rm");
+    const skillDir = join(skillsDir, "qa");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# QA Skill\n\nOriginal content.\n");
+
+    // First write a patch
+    Bun.spawnSync({
+      cmd: ["bash", applyScript, "--skill", "qa", "--patch-id", "rm-test-1",
+        "--content", "### To Remove"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    // Now remove it
+    const result = Bun.spawnSync({
+      cmd: ["bash", applyScript, "--remove", "rm-test-1", "--skill", "qa"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    expect(result.stdout.toString()).toContain("REMOVED");
+
+    // SKILL.md should be clean
+    const skillMd = readFileSync(join(skillDir, "SKILL.md"), "utf-8");
+    expect(skillMd).not.toContain("### To Remove");
+    expect(skillMd).toContain("# QA Skill");
+  });
+
+  test("duplicate patch is rejected", () => {
+    const skillsDir = join(tmp, "skills-dup");
+    const skillDir = join(skillsDir, "qa");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# QA\n");
+
+    // Write twice
+    Bun.spawnSync({
+      cmd: ["bash", applyScript, "--skill", "qa", "--patch-id", "dup-1",
+        "--content", "### Patch A"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+    const result = Bun.spawnSync({
+      cmd: ["bash", applyScript, "--skill", "qa", "--patch-id", "dup-1",
+        "--content", "### Patch A again"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    expect(result.stdout.toString()).toContain("DUPLICATE");
+  });
+
+  test("list shows active patches", () => {
+    const skillsDir = join(tmp, "skills-list");
+    const skillDir = join(skillsDir, "review");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# Review\n");
+
+    Bun.spawnSync({
+      cmd: ["bash", applyScript, "--skill", "review", "--patch-id", "list-1",
+        "--content", "### Patch", "--confidence", "0.95"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    const result = Bun.spawnSync({
+      cmd: ["bash", applyScript, "--list", "--skill", "review"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    expect(result.stdout.toString()).toContain("list-1");
+    expect(result.stdout.toString()).toContain("0.95");
+  });
+
+  test("backup is created before deployment", () => {
+    const skillsDir = join(tmp, "skills-bak");
+    const skillDir = join(skillsDir, "qa");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# Original Content\n");
+
+    Bun.spawnSync({
+      cmd: ["bash", applyScript, "--skill", "qa", "--patch-id", "bak-1",
+        "--content", "### New patch"],
+      env: { ...process.env, GSTACK_STATE_DIR: tmp, GSTACK_SKILLS_DIR: skillsDir },
+    });
+
+    // Check backup exists
+    const backupFile = join(tmp, "skill-backups", "qa.SKILL.md.bak");
+    const backup = readFileSync(backupFile, "utf-8");
+    expect(backup).toContain("# Original Content");
+    expect(backup).not.toContain("### New patch");
+  });
+});

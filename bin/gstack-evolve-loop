@@ -100,9 +100,9 @@ find_top_opportunity() {
   " 2>/dev/null
 }
 
-# ─── Helper: simulate evolve change ────────────────────────
-# In autonomous mode, changes are based on learned patterns.
-# For now, we record a learning-based improvement and simulate the metric change.
+# ─── Helper: apply evolve change to SKILL.md ──────────────
+# Analyzes telemetry failures, generates a patch, and applies it
+# to the actual SKILL.md template so future skill runs benefit.
 apply_evolve_change() {
   local skill="$1"
   local iteration="$2"
@@ -118,7 +118,7 @@ apply_evolve_change() {
   top_error=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"event_type":"skill_run"' | grep '"outcome":"error"' | \
     grep -o '"error_class":"[^"]*"' | sort | uniq -c | sort -rn | head -1 | awk -F'"' '{print $4}')
 
-  # Skip if no actual skill_run failures exist for this skill
+  # Skip if no actual skill_run data exists for this skill
   if [ "$failure_count" -eq 0 ] && [ "$total_count" -eq 0 ]; then
     echo "SKIP_NO_DATA"
     return
@@ -126,46 +126,53 @@ apply_evolve_change() {
 
   [ -z "$top_error" ] && top_error="general_failure"
 
-  # Determine fix type based on error pattern
-  local fix_description
-  local change_type="learning"
-  case "$top_error" in
-    timeout)
-      fix_description="Add connection pre-check before network operations"
-      ;;
-    scope_exceeded)
-      fix_description="Add time-budget checkpoint at phase midpoint"
-      ;;
-    parse_error)
-      fix_description="Add input validation and fallback parsing"
-      ;;
-    ci_failure)
-      fix_description="Add pre-flight lint check before CI submission"
-      ;;
-    *)
-      fix_description="Add error handling for $top_error failures"
-      ;;
-  esac
-
-  # Record as learned pattern
   local pattern_id="evolve-loop-${skill}-${iteration}-$(date +%s)"
   local ts
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local evidence="$failure_count/$total_count errors with $top_error"
 
-  echo "{\"id\":\"$pattern_id\",\"repo_slug\":\"*\",\"skill\":\"$skill\",\"pattern\":\"$fix_description\",\"evidence\":\"$failure_count/$total_count errors with $top_error\",\"confidence\":0.85,\"use_count\":0,\"tags\":[\"auto-evolve\",\"iteration-$iteration\"],\"created\":\"$ts\",\"last_used\":\"$ts\"}" \
+  # Generate patch content using patch-templates
+  local patch_content
+  patch_content=$(bun -e "
+    const { getPatchContent } = require('$GSTACK_DIR/lib/patch-templates.ts');
+    const patch = getPatchContent('$skill', '$top_error', '$evidence', '$pattern_id');
+    if (patch) {
+      console.log(JSON.stringify({ title: patch.title, content: patch.content }));
+    } else {
+      console.log('null');
+    }
+  " 2>/dev/null)
+
+  # Fallback description if no template found
+  local fix_description
+  if [ "$patch_content" = "null" ] || [ -z "$patch_content" ]; then
+    fix_description="Add error handling for $top_error failures"
+  else
+    fix_description=$(echo "$patch_content" | bun -e "
+      const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      console.log(d.title);
+    " 2>/dev/null || echo "Add error handling for $top_error failures")
+  fi
+
+  # Record as learned pattern
+  echo "{\"id\":\"$pattern_id\",\"repo_slug\":\"*\",\"skill\":\"$skill\",\"pattern\":\"$fix_description\",\"evidence\":\"$evidence\",\"confidence\":0.85,\"use_count\":0,\"tags\":[\"auto-evolve\",\"iteration-$iteration\"],\"created\":\"$ts\",\"last_used\":\"$ts\"}" \
     >> "$LEARNED_PATTERNS" 2>/dev/null
 
-  # Simulate the improvement by adding success events to telemetry
-  # (In real usage, the learning would improve the next actual skill run)
-  if [ "$DRY_RUN" = "false" ] && [ "$failure_count" -gt 0 ] 2>/dev/null; then
-    # Convert some failures to successes (simulating the fix effect)
-    local fix_count=$(( failure_count > 2 ? 2 : failure_count ))
-    local i=0
-    while [ "$i" -lt "$fix_count" ]; do
-      echo "{\"v\":2,\"ts\":\"$ts\",\"event_type\":\"skill_run\",\"skill\":\"$skill\",\"session_id\":\"evolve-sim-$iteration-$i\",\"gstack_version\":\"0.13.6.0\",\"os\":\"darwin\",\"arch\":\"arm64\",\"duration_s\":180,\"outcome\":\"success\",\"error_class\":null,\"error_message\":null,\"failed_step\":null,\"used_browse\":false,\"sessions\":1,\"installation_id\":null,\"source\":\"evolve-sim\",\"_repo_slug\":\"\",\"_branch\":\"main\",\"user_verdict\":\"accepted\",\"context_tags\":\"auto-evolve\"}" \
-        >> "$TELEMETRY_FILE" 2>/dev/null
-      i=$(( i + 1 ))
-    done
+  # Apply patch to actual SKILL.md (skip in dry-run mode)
+  if [ "$DRY_RUN" = "false" ] && [ "$patch_content" != "null" ] && [ -n "$patch_content" ]; then
+    local markdown_content
+    markdown_content=$(echo "$patch_content" | bun -e "
+      const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+      console.log(d.content);
+    " 2>/dev/null)
+
+    if [ -n "$markdown_content" ]; then
+      local apply_script="$GSTACK_DIR/bin/gstack-evolve-apply"
+      if [ -x "$apply_script" ]; then
+        "$apply_script" --skill "$skill" --patch-id "$pattern_id" \
+          --content "$markdown_content" --confidence "0.85" 2>/dev/null || true
+      fi
+    fi
   fi
 
   echo "$fix_description"
@@ -429,6 +436,15 @@ for ITER in $(seq 1 "$MAX_ITERATIONS"); do
     STATUS="NO_IMPROVEMENT (delta=$DELTA < threshold)"
     CONVERGE_COUNT=$(( CONVERGE_COUNT + 1 ))
     SKIP_SKILLS="$SKIP_SKILLS $TARGET"
+
+    # Rollback: remove the patch that didn't help
+    if [ "$DRY_RUN" = "false" ]; then
+      local last_patch_id
+      last_patch_id=$(grep "\"skill\":\"$TARGET\"" "$LEARNED_PATTERNS" 2>/dev/null | tail -1 | grep -o '"id":"[^"]*"' | awk -F'"' '{print $4}')
+      if [ -n "$last_patch_id" ] && [ -x "$GSTACK_DIR/bin/gstack-evolve-apply" ]; then
+        "$GSTACK_DIR/bin/gstack-evolve-apply" --remove "$last_patch_id" --skill "$TARGET" 2>/dev/null || true
+      fi
+    fi
   else
     STATUS="ACCEPTED (delta=+$DELTA)"
     log_evolution "$TARGET" "$CHANGE_DESC" "$PRE_SKILL" "$POST_SKILL" "$ITER"

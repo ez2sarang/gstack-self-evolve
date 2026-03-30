@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# gstack-evolve-apply: Apply/remove/list evolved patches to SKILL.md files
+# Patches are stored in ~/.gstack/skill-patches/{skill}.md and injected into
+# ~/.claude/skills/gstack/{skill}/SKILL.md with markers for rollback.
+
+set -euo pipefail
+
+STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+PATCHES_DIR="$STATE_DIR/skill-patches"
+BACKUPS_DIR="$STATE_DIR/skill-backups"
+SKILLS_DIR="${GSTACK_SKILLS_DIR:-$HOME/.claude/skills/gstack}"
+
+usage() {
+  echo "Usage:"
+  echo "  gstack-evolve-apply --skill NAME --patch-id ID --content 'markdown' [--confidence N]"
+  echo "  gstack-evolve-apply --remove ID --skill NAME"
+  echo "  gstack-evolve-apply --list [--skill NAME]"
+  echo "  gstack-evolve-apply --reapply-all"
+  echo "  gstack-evolve-apply --deploy --skill NAME"
+  exit 1
+}
+
+# ─── Write a patch to storage ──────────────────────────────
+write_patch() {
+  local skill="$1" patch_id="$2" content="$3" confidence="${4:-0.85}"
+  mkdir -p "$PATCHES_DIR"
+
+  local patch_file="$PATCHES_DIR/$skill.md"
+
+  # Check for duplicate
+  if [ -f "$patch_file" ] && grep -q "<!-- patch:$patch_id " "$patch_file" 2>/dev/null; then
+    echo "DUPLICATE: $patch_id already exists for $skill"
+    return 0
+  fi
+
+  # Append patch with markers
+  {
+    echo ""
+    echo "<!-- patch:$patch_id confidence:$confidence -->"
+    echo "$content"
+    echo "<!-- /patch:$patch_id -->"
+  } >> "$patch_file"
+
+  echo "WRITTEN: $patch_id -> $patch_file"
+}
+
+# ─── Remove a patch from storage ───────────────────────────
+remove_patch() {
+  local skill="$1" patch_id="$2"
+  local patch_file="$PATCHES_DIR/$skill.md"
+
+  if [ ! -f "$patch_file" ]; then
+    echo "NO_PATCHES: $skill"
+    return 0
+  fi
+
+  # Remove the patch block between markers
+  local tmp_file
+  tmp_file=$(mktemp)
+  awk -v id="$patch_id" '
+    /<!-- patch:/ && $0 ~ id { skip=1; next }
+    /<!-- \/patch:/ && $0 ~ id { skip=0; next }
+    !skip { print }
+  ' "$patch_file" > "$tmp_file"
+
+  mv "$tmp_file" "$patch_file"
+
+  # Remove file if empty (only whitespace)
+  if [ ! -s "$patch_file" ] || ! grep -q '[^[:space:]]' "$patch_file" 2>/dev/null; then
+    rm -f "$patch_file"
+    echo "REMOVED: $patch_id (no patches left for $skill)"
+  else
+    echo "REMOVED: $patch_id from $skill"
+  fi
+}
+
+# ─── List patches ──────────────────────────────────────────
+list_patches() {
+  local skill="${1:-}"
+
+  if [ -n "$skill" ]; then
+    local patch_file="$PATCHES_DIR/$skill.md"
+    if [ -f "$patch_file" ]; then
+      grep -o '<!-- patch:[^ ]* confidence:[^ ]* -->' "$patch_file" 2>/dev/null | \
+        sed 's/<!-- patch:\([^ ]*\) confidence:\([^ ]*\) -->/\1 (confidence: \2)/' || true
+    else
+      echo "NO_PATCHES: $skill"
+    fi
+  else
+    if [ -d "$PATCHES_DIR" ]; then
+      for f in "$PATCHES_DIR"/*.md; do
+        [ -f "$f" ] || continue
+        local s
+        s=$(basename "$f" .md)
+        local count
+        count=$(grep -c '<!-- patch:' "$f" 2>/dev/null || echo 0)
+        echo "$s: $count patches"
+      done
+    else
+      echo "NO_PATCHES"
+    fi
+  fi
+}
+
+# ─── Deploy patches to SKILL.md ───────────────────────────
+deploy_skill() {
+  local skill="$1"
+  local skill_md="$SKILLS_DIR/$skill/SKILL.md"
+  local patch_file="$PATCHES_DIR/$skill.md"
+
+  if [ ! -f "$skill_md" ]; then
+    echo "SKILL_NOT_FOUND: $skill_md"
+    return 1
+  fi
+
+  # Backup before modification
+  mkdir -p "$BACKUPS_DIR"
+  cp "$skill_md" "$BACKUPS_DIR/${skill}.SKILL.md.bak"
+
+  # Strip any existing evolved patches from SKILL.md
+  local tmp_file
+  tmp_file=$(mktemp)
+  awk '
+    /^<!-- EVOLVE-PATCHES START -->/ { skip=1; next }
+    /^<!-- EVOLVE-PATCHES END -->/ { skip=0; next }
+    !skip { print }
+  ' "$skill_md" > "$tmp_file"
+
+  # If there are patches to apply, append them
+  if [ -f "$patch_file" ] && [ -s "$patch_file" ] && grep -q '[^[:space:]]' "$patch_file" 2>/dev/null; then
+    {
+      echo ""
+      echo "<!-- EVOLVE-PATCHES START -->"
+      echo "## Evolved Improvements (auto-applied by gstack evolve-loop)"
+      echo ""
+      cat "$patch_file"
+      echo ""
+      echo "<!-- EVOLVE-PATCHES END -->"
+    } >> "$tmp_file"
+    echo "DEPLOYED: $(grep -c '<!-- patch:' "$patch_file" 2>/dev/null || echo 0) patches -> $skill_md"
+  else
+    echo "CLEANED: removed evolved patches from $skill (no active patches)"
+  fi
+
+  mv "$tmp_file" "$skill_md"
+}
+
+# ─── Reapply all patches after upgrade ─────────────────────
+reapply_all() {
+  if [ ! -d "$PATCHES_DIR" ]; then
+    echo "NO_PATCHES_DIR"
+    return 0
+  fi
+
+  local count=0
+  for f in "$PATCHES_DIR"/*.md; do
+    [ -f "$f" ] || continue
+    local skill
+    skill=$(basename "$f" .md)
+    deploy_skill "$skill"
+    count=$((count + 1))
+  done
+
+  echo "REAPPLIED: $count skills"
+}
+
+# ─── Parse arguments ───────────────────────────────────────
+ACTION=""
+SKILL=""
+PATCH_ID=""
+CONTENT=""
+CONFIDENCE="0.85"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --skill) SKILL="$2"; shift 2 ;;
+    --patch-id) PATCH_ID="$2"; shift 2 ;;
+    --content) CONTENT="$2"; shift 2 ;;
+    --confidence) CONFIDENCE="$2"; shift 2 ;;
+    --remove) ACTION="remove"; PATCH_ID="$2"; shift 2 ;;
+    --list) ACTION="list"; shift ;;
+    --reapply-all) ACTION="reapply"; shift ;;
+    --deploy) ACTION="deploy"; shift ;;
+    *) shift ;;
+  esac
+done
+
+# Default action: write + deploy
+if [ -z "$ACTION" ] && [ -n "$SKILL" ] && [ -n "$PATCH_ID" ] && [ -n "$CONTENT" ]; then
+  ACTION="write"
+fi
+
+case "$ACTION" in
+  write)
+    [ -z "$SKILL" ] || [ -z "$PATCH_ID" ] || [ -z "$CONTENT" ] && usage
+    write_patch "$SKILL" "$PATCH_ID" "$CONTENT" "$CONFIDENCE"
+    deploy_skill "$SKILL"
+    ;;
+  remove)
+    [ -z "$SKILL" ] || [ -z "$PATCH_ID" ] && usage
+    remove_patch "$SKILL" "$PATCH_ID"
+    deploy_skill "$SKILL"
+    ;;
+  deploy)
+    [ -z "$SKILL" ] && usage
+    deploy_skill "$SKILL"
+    ;;
+  list)
+    list_patches "$SKILL"
+    ;;
+  reapply)
+    reapply_all
+    ;;
+  *)
+    usage
+    ;;
+esac
