@@ -292,6 +292,149 @@ Available skills: /office-hours, /plan-ceo-review, /plan-eng-review, /plan-desig
 /unfreeze, /gstack-upgrade.
 ```
 
+## Self-Evolution System
+
+This fork adds a self-evolution mechanism inspired by [MiniMax M27's self-evolution agent](https://www.minimax.io/news/minimax-m27-en). The core idea: gstack skills get better the more you use them. Three features work together to create a recursive improvement loop.
+
+### Feature 1: Skill Performance Feedback Loop (v:2 Telemetry)
+
+Extended telemetry schema captures rich feedback data beyond basic success/error tracking.
+
+**New fields** (all optional, backward-compatible with v:1):
+- `bugs_found`, `bugs_fixed`, `false_positives` — quantitative skill output
+- `user_verdict` — accepted/rejected/modified/abandoned
+- `retry_count`, `failure_reason` — error analysis
+- `context_tags`, `skill_phase` — execution context
+- `health_score_before`, `health_score_after` — quality delta
+
+**Health dashboard:**
+```bash
+# View skill health stats
+bash bin/gstack-analytics-health
+
+# Filter by time window or skill
+bash bin/gstack-analytics-health --days 7 --skill qa
+```
+
+Output:
+```
+Skill Health Dashboard (last 30d)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  SKILL              RUNS    OK%    ERR  AVG DUR
+  /qa                   8    50%      4    2m51s
+  /review               5    80%      1    2m38s
+  /ship                 4    75%      1    5m27s
+  /investigate          4    50%      2   12m47s
+```
+
+### Feature 2: Cross-Session Learning Memory
+
+Learnings persist across sessions in `~/.gstack/learned/`. Skills reference past patterns and anti-patterns to avoid repeating mistakes.
+
+**CLI commands:**
+```bash
+# Auto-detect project tech stack
+bash bin/gstack-detect-project
+
+# Add a learned pattern
+bash bin/gstack-learn add-pattern --skill qa \
+  --pattern "Always run bun dev before QA testing" \
+  --tags dev-server,startup
+
+# Add an anti-pattern
+bash bin/gstack-learn add-anti-pattern --skill investigate \
+  --anti-pattern "Do not use git bisect on monorepos with >1000 commits"
+
+# List learnings for current repo
+bash bin/gstack-learn list
+
+# Forget a learning
+bash bin/gstack-learn forget <id>
+
+# Garbage-collect stale entries (confidence < 0.1)
+bash bin/gstack-learn gc
+```
+
+**Data files:**
+```
+~/.gstack/learned/
+  patterns.jsonl          # What works
+  anti-patterns.jsonl     # What to avoid
+  project-profiles/       # Auto-detected tech stacks per repo
+```
+
+**Confidence decay:** Patterns lose 0.05 confidence per week of non-use. Below 0.3 they're hidden from skill prompts. Below 0.1 they're eligible for garbage collection.
+
+**TypeScript API** (`lib/learned.ts`):
+```typescript
+import { readPatterns, writePattern, surfaceRelevantLearnings } from './lib/learned';
+
+const patterns = readPatterns('my-app', 'qa');
+const relevant = surfaceRelevantLearnings('my-app', 'qa'); // applies decay, filters
+```
+
+### Feature 3: /evolve Skill (Self-Diagnosis Engine)
+
+The `/evolve` skill analyzes accumulated telemetry and learnings to propose concrete skill improvements. Four phases, following M27's recursive loop:
+
+| Phase | What it does |
+|-------|-------------|
+| **Diagnose** | Reads skill-usage.jsonl, contributor logs, learnings. Ranks skills by improvement opportunity: `(1 - success_rate) * total_runs` |
+| **Hypothesize** | For top 3 skills, reads templates, cross-references errors with instructions, forms data-backed hypotheses with confidence scores |
+| **Propose** | Generates concrete fixes (template mods, CLI tools, or learnings). Shows diffs, expected impact, risk level. Asks for approval |
+| **Validate** | Applies approved changes, runs gen:skill-docs + bun test, logs to evolutions.jsonl. Reverts on failure |
+
+**Usage:**
+```
+/evolve
+```
+
+The next `/evolve` run compares pre/post metrics for previous changes. If improvement < 50% of predicted, it flags for revision. This creates the self-referencing improvement loop.
+
+**Evolution log** (`~/.gstack/analytics/evolutions.jsonl`):
+```json
+{
+  "ts": "2026-03-30T00:52:53Z",
+  "target_skill": "qa",
+  "hypothesis": "50% timeout rate caused by missing dev server pre-check",
+  "change_type": "template_proposal",
+  "validated": false,
+  "expected_impact": "Reduce qa timeout rate from 50% to <10%",
+  "confidence": 0.90
+}
+```
+
+### Testing
+
+```bash
+# Run all self-evolve tests
+cd /path/to/gstack-self-evolve
+bun test test/feedback-loop.test.ts    # v:2 telemetry schema
+bun test test/learned.test.ts          # learning memory + CLI
+
+# Run full test suite (includes existing gstack tests)
+bun test
+```
+
+### How it works together
+
+```
+Skill runs → v:2 telemetry → skill-usage.jsonl
+                                    ↓
+                            /evolve diagnoses
+                                    ↓
+                         hypotheses + proposals
+                                    ↓
+                    approved changes → evolutions.jsonl
+                                    ↓
+                         learnings → patterns.jsonl
+                                    ↓
+                    next skill run reads learnings
+                                    ↓
+                    next /evolve measures actual impact
+                            (recursive loop)
+```
+
 ## License
 
 MIT. Free forever. Go build something.
