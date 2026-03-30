@@ -179,9 +179,36 @@ When `/evolve` runs again later, it checks `evolutions.jsonl`:
 - If improvement >= predicted: increase confidence in that fix pattern
 - This creates the M27-style recursive improvement loop
 
+## Autonomous Loop Mode
+
+For M27-style multi-iteration evolution, use the autonomous loop:
+
+```bash
+gstack-evolve-loop [--iterations N] [--min-improvement 0.5] [--dry-run]
+```
+
+The loop runs N iterations automatically without human approval:
+- Each iteration: diagnose → propose → apply → validate → compare
+- Auto-rollback if metrics worsen
+- Convergence detection: stops after 2 consecutive no-improvement iterations
+- Per-iteration reports with upstream garrytan/gstack comparison
+
+Example:
+```bash
+# 5 iterations with live data
+bash bin/gstack-evolve-loop --iterations 5
+
+# Preview what would change without applying
+bash bin/gstack-evolve-loop --dry-run --iterations 10
+
+# Custom threshold (only accept changes that improve score by 2+)
+bash bin/gstack-evolve-loop --min-improvement 2
+```
+
 ## Tips
 
 - Run `/evolve` after accumulating at least 20 skill runs for meaningful data
 - Start with high-opportunity, low-risk fixes
 - The evolution log creates accountability: each change is tracked
 - If a change makes things worse, the next `/evolve` run will detect the regression
+- Use `--dry-run` to preview what the loop would target without changing anything

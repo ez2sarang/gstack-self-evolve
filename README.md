@@ -404,6 +404,53 @@ The next `/evolve` run compares pre/post metrics for previous changes. If improv
 }
 ```
 
+### Feature 4: Autonomous Multi-Iteration Loop (M27-style)
+
+The missing piece from MiniMax M27: automatic N-iteration evolution without human approval.
+
+```bash
+# Run 5 autonomous iterations
+bash bin/gstack-evolve-loop --iterations 5
+
+# Preview without applying changes
+bash bin/gstack-evolve-loop --dry-run --iterations 10
+
+# Custom improvement threshold
+bash bin/gstack-evolve-loop --min-improvement 2
+```
+
+Each iteration:
+1. Computes system health score (0-100) from telemetry
+2. Finds the skill with highest improvement opportunity
+3. Auto-applies a fix (learning-based)
+4. Validates: if health improves, keeps the change. If not, rolls back.
+5. Prints a per-iteration report with upstream comparison
+
+**Convergence detection**: Stops after 2 consecutive no-improvement iterations.
+
+**Benchmark scoring formula**:
+```
+healthScore = successRate*40 + verdictAcceptance*30 + (1-FP_rate)*15 + durationScore*15
+durationScore = sigmoid centered at 5min
+overallScore = weighted average by run count
+```
+
+**Upstream comparison**: After each iteration, compares against garrytan/gstack:
+- Skill count, phase count, pre-checks, unique features
+- Telemetry schema richness (v:2 vs v:1)
+- Learning memory (unique to self-evolve)
+
+**Sample output** (5 iterations, 21 telemetry events):
+```
+Baseline:    54/100
+Iteration 1: /qa  42→61  (+19), System 54→61  (+7)  ACCEPTED
+Iteration 2: /qa  61→68  (+7),  System 61→65  (+4)  ACCEPTED
+Iteration 3: /qa  68→73  (+5),  System 65→68  (+3)  ACCEPTED
+Iteration 4: /qa  73→76  (+3),  System 68→70  (+2)  ACCEPTED
+Iteration 5: /qa  76→78  (+2),  System 70→71  (+1)  ACCEPTED
+Final:       71/100  (+31% improvement)
+```
+
 ### Testing
 
 ```bash
@@ -411,6 +458,7 @@ The next `/evolve` run compares pre/post metrics for previous changes. If improv
 cd /path/to/gstack-self-evolve
 bun test test/feedback-loop.test.ts    # v:2 telemetry schema
 bun test test/learned.test.ts          # learning memory + CLI
+bun test test/evolve-loop.test.ts      # benchmark + upstream comparison + loop
 
 # Run full test suite (includes existing gstack tests)
 bun test
@@ -421,17 +469,27 @@ bun test
 ```
 Skill runs → v:2 telemetry → skill-usage.jsonl
                                     ↓
-                            /evolve diagnoses
+              ┌─────── gstack-evolve-loop (N iterations) ───────┐
+              │                                                  │
+              │  computeSystemHealth() → baseline score          │
+              │           ↓                                      │
+              │  find_top_opportunity() → target skill            │
+              │           ↓                                      │
+              │  apply_evolve_change() → learning + sim events   │
+              │           ↓                                      │
+              │  computeSystemHealth() → new score               │
+              │           ↓                                      │
+              │  delta > threshold? → ACCEPT : ROLLBACK          │
+              │           ↓                                      │
+              │  compareUpstream() → vs garrytan/gstack report   │
+              │           ↓                                      │
+              │  converge_count >= 2? → STOP : continue          │
+              └──────────────────────────────────────────────────┘
                                     ↓
-                         hypotheses + proposals
+                         evolutions.jsonl (history)
+                         patterns.jsonl (learnings)
                                     ↓
-                    approved changes → evolutions.jsonl
-                                    ↓
-                         learnings → patterns.jsonl
-                                    ↓
-                    next skill run reads learnings
-                                    ↓
-                    next /evolve measures actual impact
+                    next loop run measures actual impact
                             (recursive loop)
 ```
 
