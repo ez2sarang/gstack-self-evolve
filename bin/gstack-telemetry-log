@@ -36,18 +36,6 @@ ERROR_MESSAGE=""
 FAILED_STEP=""
 EVENT_TYPE="skill_run"
 SOURCE=""
-BUGS_FOUND=""
-BUGS_FIXED=""
-FALSE_POSITIVES=""
-USER_VERDICT=""
-RETRY_COUNT=""
-FAILURE_REASON=""
-CONTEXT_TAGS=""
-SKILL_PHASE=""
-QUESTIONS_ASKED=""
-COMMITS_MADE=""
-HEALTH_BEFORE=""
-HEALTH_AFTER=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,18 +49,6 @@ while [ $# -gt 0 ]; do
     --failed-step)   FAILED_STEP="$2"; shift 2 ;;
     --event-type)    EVENT_TYPE="$2"; shift 2 ;;
     --source)        SOURCE="$2"; shift 2 ;;
-    --bugs-found)    BUGS_FOUND="$2"; shift 2 ;;
-    --bugs-fixed)    BUGS_FIXED="$2"; shift 2 ;;
-    --false-positives) FALSE_POSITIVES="$2"; shift 2 ;;
-    --user-verdict)  USER_VERDICT="$2"; shift 2 ;;
-    --retry-count)   RETRY_COUNT="$2"; shift 2 ;;
-    --failure-reason) FAILURE_REASON="$2"; shift 2 ;;
-    --context-tags)  CONTEXT_TAGS="$2"; shift 2 ;;
-    --skill-phase)   SKILL_PHASE="$2"; shift 2 ;;
-    --questions-asked) QUESTIONS_ASKED="$2"; shift 2 ;;
-    --commits-made)  COMMITS_MADE="$2"; shift 2 ;;
-    --health-before) HEALTH_BEFORE="$2"; shift 2 ;;
-    --health-after)  HEALTH_AFTER="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -212,41 +188,11 @@ INSTALL_FIELD="null"
 BROWSE_BOOL="false"
 [ "$USED_BROWSE" = "true" ] && BROWSE_BOOL="true"
 
-# Determine schema version — v:2 if any feedback field is set
-_SCHEMA_V=1
-[ -n "$BUGS_FOUND" ] || [ -n "$BUGS_FIXED" ] || [ -n "$FALSE_POSITIVES" ] || \
-[ -n "$USER_VERDICT" ] || [ -n "$RETRY_COUNT" ] || [ -n "$FAILURE_REASON" ] || \
-[ -n "$CONTEXT_TAGS" ] || [ -n "$SKILL_PHASE" ] || [ -n "$QUESTIONS_ASKED" ] || \
-[ -n "$COMMITS_MADE" ] || [ -n "$HEALTH_BEFORE" ] || [ -n "$HEALTH_AFTER" ] && _SCHEMA_V=2
-
-# Build v:2 feedback fields (only included when v=2)
-_FB_JSON=""
-if [ "$_SCHEMA_V" = "2" ]; then
-  # Numeric fields: null if empty
-  _BF="null"; [ -n "$BUGS_FOUND" ] && _BF="$BUGS_FOUND"
-  _BX="null"; [ -n "$BUGS_FIXED" ] && _BX="$BUGS_FIXED"
-  _FP="null"; [ -n "$FALSE_POSITIVES" ] && _FP="$FALSE_POSITIVES"
-  _RC="null"; [ -n "$RETRY_COUNT" ] && _RC="$RETRY_COUNT"
-  _QA="null"; [ -n "$QUESTIONS_ASKED" ] && _QA="$QUESTIONS_ASKED"
-  _CM="null"; [ -n "$COMMITS_MADE" ] && _CM="$COMMITS_MADE"
-  _HB="null"; [ -n "$HEALTH_BEFORE" ] && _HB="$HEALTH_BEFORE"
-  _HA="null"; [ -n "$HEALTH_AFTER" ] && _HA="$HEALTH_AFTER"
-
-  # String fields: null if empty, json_safe'd
-  _UV="null"; [ -n "$USER_VERDICT" ] && _UV="\"$(json_safe "$USER_VERDICT")\""
-  _FR="null"; [ -n "$FAILURE_REASON" ] && _FR="\"$(json_safe "$FAILURE_REASON")\""
-  _CT="null"; [ -n "$CONTEXT_TAGS" ] && _CT="\"$(json_safe "$CONTEXT_TAGS")\""
-  _SP="null"; [ -n "$SKILL_PHASE" ] && _SP="\"$(json_safe "$SKILL_PHASE")\""
-
-  _FB_JSON=$(printf ',"bugs_found":%s,"bugs_fixed":%s,"false_positives":%s,"user_verdict":%s,"retry_count":%s,"failure_reason":%s,"context_tags":%s,"skill_phase":%s,"questions_asked":%s,"commits_made":%s,"health_score_before":%s,"health_score_after":%s' \
-    "$_BF" "$_BX" "$_FP" "$_UV" "$_RC" "$_FR" "$_CT" "$_SP" "$_QA" "$_CM" "$_HB" "$_HA")
-fi
-
-printf '{"v":%s,"ts":"%s","event_type":"%s","skill":"%s","session_id":"%s","gstack_version":"%s","os":"%s","arch":"%s","duration_s":%s,"outcome":"%s","error_class":%s,"error_message":%s,"failed_step":%s,"used_browse":%s,"sessions":%s,"installation_id":%s,"source":"%s","_repo_slug":"%s","_branch":"%s"%s}\n' \
-  "$_SCHEMA_V" "$TS" "$EVENT_TYPE" "$SKILL" "$SESSION_ID" "$GSTACK_VERSION" "$OS" "$ARCH" \
+printf '{"v":1,"ts":"%s","event_type":"%s","skill":"%s","session_id":"%s","gstack_version":"%s","os":"%s","arch":"%s","duration_s":%s,"outcome":"%s","error_class":%s,"error_message":%s,"failed_step":%s,"used_browse":%s,"sessions":%s,"installation_id":%s,"source":"%s","_repo_slug":"%s","_branch":"%s"}\n' \
+  "$TS" "$EVENT_TYPE" "$SKILL" "$SESSION_ID" "$GSTACK_VERSION" "$OS" "$ARCH" \
   "$DUR_FIELD" "$OUTCOME" "$ERR_FIELD" "$ERR_MSG_FIELD" "$STEP_FIELD" \
   "$BROWSE_BOOL" "${SESSIONS:-1}" \
-  "$INSTALL_FIELD" "$SOURCE" "$REPO_SLUG" "$BRANCH" "$_FB_JSON" >> "$JSONL_FILE" 2>/dev/null || true
+  "$INSTALL_FIELD" "$SOURCE" "$REPO_SLUG" "$BRANCH" >> "$JSONL_FILE" 2>/dev/null || true
 
 # ─── Trigger sync if tier is not off ─────────────────────────
 SYNC_CMD="$GSTACK_DIR/bin/gstack-telemetry-sync"
