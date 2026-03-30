@@ -184,10 +184,11 @@ When `/evolve` runs again later, it checks `evolutions.jsonl`:
 For M27-style multi-iteration evolution, use the autonomous loop:
 
 ```bash
-gstack-evolve-loop [--iterations N] [--min-improvement 0.5] [--dry-run]
+gstack-evolve-loop [--iterations N] [--min-improvement 0.5] [--dry-run] [--no-sync]
 ```
 
 The loop runs N iterations automatically without human approval:
+- **Upstream sync** (default): fetches and merges garrytan/gstack before evolving
 - Each iteration: diagnose → propose → apply → validate → compare
 - Auto-rollback if metrics worsen
 - Convergence detection: stops after 2 consecutive no-improvement iterations
@@ -195,11 +196,14 @@ The loop runs N iterations automatically without human approval:
 
 Example:
 ```bash
-# 5 iterations with live data
+# 5 iterations with live data (syncs upstream first)
 bash bin/gstack-evolve-loop --iterations 5
 
 # Preview what would change without applying
 bash bin/gstack-evolve-loop --dry-run --iterations 10
+
+# Skip upstream sync (offline or manual control)
+bash bin/gstack-evolve-loop --no-sync --iterations 5
 
 # Custom threshold (only accept changes that improve score by 2+)
 bash bin/gstack-evolve-loop --min-improvement 2

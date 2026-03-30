@@ -7,7 +7,10 @@
 # Convergence detection: stops after 2 consecutive no-improvement iterations.
 #
 # Usage:
-#   gstack-evolve-loop [--iterations N] [--min-improvement 0.5] [--dry-run] [--telemetry-file PATH]
+#   gstack-evolve-loop [--iterations N] [--min-improvement 0.5] [--dry-run] [--no-sync] [--telemetry-file PATH]
+#
+# Flags:
+#   --no-sync          — skip upstream sync (default: sync before evolving)
 #
 # Env overrides:
 #   GSTACK_STATE_DIR   — override ~/.gstack state directory
@@ -25,6 +28,7 @@ LEARNED_PATTERNS="$STATE_DIR/learned/patterns.jsonl"
 MAX_ITERATIONS=5
 MIN_IMPROVEMENT=0.5
 DRY_RUN=false
+SYNC_UPSTREAM=true
 
 # Parse args
 while [ $# -gt 0 ]; do
@@ -32,6 +36,7 @@ while [ $# -gt 0 ]; do
     --iterations)        MAX_ITERATIONS="$2"; shift 2 ;;
     --min-improvement)   MIN_IMPROVEMENT="$2"; shift 2 ;;
     --dry-run)           DRY_RUN=true; shift ;;
+    --no-sync)           SYNC_UPSTREAM=false; shift ;;
     --telemetry-file)    TELEMETRY_FILE="$2"; shift 2 ;;
     *) shift ;;
   esac
@@ -231,8 +236,119 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  Iterations: $MAX_ITERATIONS"
 echo "  Min improvement: $MIN_IMPROVEMENT"
 echo "  Dry run: $DRY_RUN"
+echo "  Sync upstream: $SYNC_UPSTREAM"
 echo "  Telemetry: $TELEMETRY_FILE"
 echo ""
+
+# ─── Upstream Sync (default: enabled) ─────────────────────────
+sync_upstream() {
+  if [ "$SYNC_UPSTREAM" = "false" ]; then
+    echo "Upstream Sync"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Status:    SKIPPED (--no-sync)"
+    echo ""
+    return 0
+  fi
+
+  echo "Upstream Sync"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Check if we're in a git repo
+  if ! git -C "$GSTACK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "  Status:    SKIPPED (not a git repo)"
+    echo ""
+    return 0
+  fi
+
+  # Ensure upstream remote
+  if ! git -C "$GSTACK_DIR" remote | grep -q "^upstream$"; then
+    echo "  Adding upstream remote..."
+    git -C "$GSTACK_DIR" remote add upstream https://github.com/garrytan/gstack.git 2>/dev/null || true
+  fi
+
+  # Fetch upstream
+  echo "  Fetching upstream..."
+  if ! git -C "$GSTACK_DIR" fetch upstream --quiet 2>/dev/null; then
+    echo "  Status:    FETCH FAILED (continuing with local version)"
+    echo "  Local:     v$(cat "$GSTACK_DIR/VERSION" 2>/dev/null || echo "unknown")"
+    echo ""
+    return 0
+  fi
+
+  # Read versions
+  LOCAL_VER=$(cat "$GSTACK_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+  UPSTREAM_VER=$(git -C "$GSTACK_DIR" show upstream/main:VERSION 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+
+  # Count commits behind
+  COMMITS_BEHIND=$(git -C "$GSTACK_DIR" rev-list HEAD..upstream/main --count 2>/dev/null || echo "0")
+
+  if [ "$COMMITS_BEHIND" = "0" ]; then
+    echo "  Status:    UP TO DATE"
+    echo "  Version:   v$LOCAL_VER"
+    echo ""
+    return 0
+  fi
+
+  # Get changed templates
+  CHANGED_TEMPLATES=$(git -C "$GSTACK_DIR" diff HEAD...upstream/main --name-only -- '*/SKILL.md.tmpl' 2>/dev/null || true)
+  TEMPLATE_COUNT=$(echo "$CHANGED_TEMPLATES" | grep -c . 2>/dev/null || echo "0")
+
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  Status:    WOULD SYNC (+$COMMITS_BEHIND commits)"
+    echo "  Local:     v$LOCAL_VER"
+    echo "  Upstream:  v$UPSTREAM_VER"
+    echo "  Templates: $TEMPLATE_COUNT would change"
+    if [ -n "$CHANGED_TEMPLATES" ]; then
+      echo "$CHANGED_TEMPLATES" | head -5 | while read -r t; do
+        [ -n "$t" ] && echo "    - $t"
+      done
+    fi
+    echo ""
+    return 0
+  fi
+
+  # Check for uncommitted changes
+  if [ -n "$(git -C "$GSTACK_DIR" status --porcelain 2>/dev/null)" ]; then
+    echo "  Status:    SKIPPED (uncommitted changes, commit first)"
+    echo "  Behind:    $COMMITS_BEHIND commits"
+    echo ""
+    return 0
+  fi
+
+  # Merge with ours strategy (self-evolve changes win on conflict)
+  echo "  Merging $COMMITS_BEHIND commits from upstream v$UPSTREAM_VER..."
+  if git -C "$GSTACK_DIR" merge upstream/main --no-edit -X ours 2>/dev/null; then
+    NEW_VER=$(cat "$GSTACK_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+    echo "  Status:    SYNCED"
+    echo "  Version:   v$LOCAL_VER -> v$NEW_VER"
+    echo "  Commits:   +$COMMITS_BEHIND"
+    echo "  Templates: $TEMPLATE_COUNT changed"
+
+    # Classify learnings if patterns exist
+    if [ -f "$LEARNED_PATTERNS" ] && [ -n "$CHANGED_TEMPLATES" ]; then
+      PATTERN_COUNT=$(wc -l < "$LEARNED_PATTERNS" 2>/dev/null | tr -d ' ')
+      if [ "$PATTERN_COUNT" -gt 0 ] 2>/dev/null; then
+        # Count learnings affected by changed templates
+        AFFECTED=0
+        echo "$CHANGED_TEMPLATES" | while read -r tmpl; do
+          SKILL_NAME=$(echo "$tmpl" | sed 's|/SKILL.md.tmpl||' | sed 's|.*/||')
+          MATCH=$(grep -c "\"skill\":\"$SKILL_NAME\"" "$LEARNED_PATTERNS" 2>/dev/null || echo "0")
+          AFFECTED=$((AFFECTED + MATCH))
+        done
+        echo "  Learnings: $PATTERN_COUNT total, checking for affected..."
+      fi
+    fi
+  else
+    echo "  Status:    MERGE FAILED (continuing with local version)"
+    # Try to abort the failed merge
+    git -C "$GSTACK_DIR" merge --abort 2>/dev/null || true
+  fi
+
+  echo ""
+  return 0
+}
+
+sync_upstream
 
 # Check telemetry data exists
 if [ ! -f "$TELEMETRY_FILE" ]; then

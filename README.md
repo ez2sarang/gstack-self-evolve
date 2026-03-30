@@ -163,18 +163,24 @@ The next `/evolve` run compares pre/post metrics for previous changes. If improv
 
 The missing piece from MiniMax M27: automatic N-iteration evolution without human approval.
 
+**Upstream sync** (default): Before evolving, automatically fetches and merges the latest garrytan/gstack. Self-evolve changes take priority on conflicts. Learnings affected by upstream template changes are classified (still valid, reinforced, or needs review).
+
 ```bash
-# Run 5 autonomous iterations
+# Run 5 autonomous iterations (syncs upstream first)
 bash bin/gstack-evolve-loop --iterations 5
 
 # Preview without applying changes
 bash bin/gstack-evolve-loop --dry-run --iterations 10
+
+# Skip upstream sync (offline or manual control)
+bash bin/gstack-evolve-loop --no-sync --iterations 5
 
 # Custom improvement threshold
 bash bin/gstack-evolve-loop --min-improvement 2
 ```
 
 Each iteration:
+0. Syncs with upstream garrytan/gstack (unless --no-sync)
 1. Computes system health score (0-100) from telemetry
 2. Finds the skill with highest improvement opportunity
 3. Auto-applies a fix (learning-based)

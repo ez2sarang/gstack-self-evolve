@@ -35,6 +35,8 @@
     "analytics": "bun run scripts/analytics.ts",
     "test:audit": "bun test test/audit-compliance.test.ts",
     "evolve:loop": "bash bin/gstack-evolve-loop",
+    "upstream:sync": "bun run lib/upstream-sync.ts",
+    "upstream:check": "bun run lib/upstream-sync.ts --check-only",
     "benchmark": "bun run lib/benchmark.ts"
   },
   "dependencies": {

@@ -14,6 +14,12 @@ import {
   compareUpstream,
   formatComparisonTable,
 } from "../lib/upstream-compare";
+import {
+  readLocalVersion,
+  classifyLearnings,
+  formatSyncReport,
+  type SyncResult,
+} from "../lib/upstream-sync";
 
 let tmp: string;
 
@@ -225,6 +231,86 @@ Confirm results.
   });
 });
 
+// ─── Upstream sync tests ─────────────────────────────────
+
+describe("upstream sync", () => {
+  test("readLocalVersion reads VERSION file", () => {
+    writeFileSync(join(tmp, "VERSION"), "1.2.3\n");
+    expect(readLocalVersion(tmp)).toBe("1.2.3");
+  });
+
+  test("readLocalVersion returns unknown for missing file", () => {
+    expect(readLocalVersion(join(tmp, "nonexistent"))).toBe("unknown");
+  });
+
+  test("classifyLearnings marks unaffected learnings as still_valid", () => {
+    const learnings = [
+      { id: "pat-1", skill: "qa", pattern: "always check dev server", tags: [] },
+      { id: "pat-2", skill: "review", pattern: "check for SQL injection", tags: [] },
+    ];
+    // Only qa template changed
+    const changedTemplates = ["qa/SKILL.md.tmpl"];
+    const result = classifyLearnings(learnings, changedTemplates, tmp);
+    // review is unaffected
+    expect(result.still_valid).toContain("pat-2");
+    // qa is affected - goes to needs_review since we can't read the diff in test
+    expect(result.still_valid).not.toContain("pat-1");
+  });
+
+  test("classifyLearnings handles empty changes", () => {
+    const learnings = [
+      { id: "pat-1", skill: "qa", pattern: "test pattern", tags: [] },
+    ];
+    const result = classifyLearnings(learnings, [], tmp);
+    expect(result.still_valid).toContain("pat-1");
+    expect(result.reinforced).toHaveLength(0);
+    expect(result.invalidated).toHaveLength(0);
+  });
+
+  test("formatSyncReport formats up_to_date correctly", () => {
+    const result: SyncResult = {
+      status: "up_to_date",
+      localVersion: "0.13.6.0",
+      upstreamVersion: "0.13.6.0",
+      mergedCommits: 0,
+      changedTemplates: [],
+      message: "Already up to date.",
+    };
+    const report = formatSyncReport(result);
+    expect(report).toContain("UP TO DATE");
+    expect(report).toContain("v0.13.6.0");
+  });
+
+  test("formatSyncReport formats synced correctly", () => {
+    const result: SyncResult = {
+      status: "synced",
+      localVersion: "0.13.6.0",
+      upstreamVersion: "0.14.0.0",
+      mergedCommits: 15,
+      changedTemplates: ["qa/SKILL.md.tmpl", "review/SKILL.md.tmpl"],
+      message: "Synced 15 commits.",
+    };
+    const report = formatSyncReport(result);
+    expect(report).toContain("SYNCED");
+    expect(report).toContain("+15 commits");
+    expect(report).toContain("2 changed");
+    expect(report).toContain("qa/SKILL.md.tmpl");
+  });
+
+  test("formatSyncReport formats skipped correctly", () => {
+    const result: SyncResult = {
+      status: "skipped",
+      localVersion: "0.13.6.0",
+      upstreamVersion: null,
+      mergedCommits: 0,
+      changedTemplates: [],
+      message: "Skipped.",
+    };
+    const report = formatSyncReport(result);
+    expect(report).toContain("SKIPPED");
+  });
+});
+
 // ─── Evolve loop integration ──────────────────────────────
 
 describe("evolve loop dry-run", () => {
@@ -247,7 +333,7 @@ describe("evolve loop dry-run", () => {
 
     const result = Bun.spawnSync({
       cmd: ["bash", join(process.cwd(), "bin/gstack-evolve-loop"),
-        "--dry-run", "--iterations", "3",
+        "--dry-run", "--no-sync", "--iterations", "3",
         "--telemetry-file", join(analyticsDir, "skill-usage.jsonl")],
       env: {
         ...process.env,
@@ -259,8 +345,37 @@ describe("evolve loop dry-run", () => {
     });
 
     const output = result.stdout.toString();
+    expect(output).toContain("Upstream Sync");
+    expect(output).toContain("SKIPPED");
     expect(output).toContain("Evolution Iteration");
     expect(output).toContain("DRY RUN");
     expect(output).toContain("Evolution Loop Complete");
+  });
+
+  test("--no-sync skips upstream sync", () => {
+    const analyticsDir = join(tmp, "analytics");
+    mkdirSync(analyticsDir, { recursive: true });
+    writeFileSync(join(analyticsDir, "skill-usage.jsonl"),
+      '{"v":1,"ts":"2026-03-28T10:00:00Z","skill":"qa","session_id":"s1","duration_s":120,"outcome":"success","source":"test"}\n' +
+      '{"v":1,"ts":"2026-03-28T11:00:00Z","skill":"qa","session_id":"s2","duration_s":30,"outcome":"error","error_class":"timeout","source":"test"}\n'
+    );
+    mkdirSync(join(tmp, "learned"), { recursive: true });
+
+    const result = Bun.spawnSync({
+      cmd: ["bash", join(process.cwd(), "bin/gstack-evolve-loop"),
+        "--dry-run", "--no-sync", "--iterations", "1",
+        "--telemetry-file", join(analyticsDir, "skill-usage.jsonl")],
+      env: {
+        ...process.env,
+        GSTACK_DIR: process.cwd(),
+        GSTACK_STATE_DIR: tmp,
+        UPSTREAM_GSTACK_DIR: join(process.env.HOME || "", ".claude/skills/gstack"),
+      },
+      cwd: process.cwd(),
+    });
+
+    const output = result.stdout.toString();
+    expect(output).toContain("SKIPPED (--no-sync)");
+    expect(output).toContain("Sync upstream: false");
   });
 });
