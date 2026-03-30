@@ -493,6 +493,51 @@ Skill runs → v:2 telemetry → skill-usage.jsonl
                             (recursive loop)
 ```
 
+## 한글 문서 (Korean Documentation)
+
+Self-Evolution 시스템의 전체 한글 가이드는 [`docs/self-evolve-guide-kr.md`](docs/self-evolve-guide-kr.md)에서 확인할 수 있습니다.
+
+### 주요 내용
+
+- **개요**: MiniMax M27 자기진화 에이전트에서 영감을 받은 재귀적 자기개선 시스템
+- **기능 1 - v:2 텔레메트리**: 성공/실패 외에 사용자 판정, 오탐률, 재시도 횟수 등 11개 피드백 필드 수집
+- **기능 2 - 학습 메모리**: 세션 간 패턴/안티패턴 유지, 주당 0.05 신뢰도 감쇠, 자동 정리
+- **기능 3 - /evolve 스킬**: 4단계 자기진단 (진단 -> 가설 -> 제안 -> 검증)
+- **기능 4 - 자율 반복 루프**: M27 방식 N회 자동 반복, 수렴 감지, 자동 롤백
+- **벤치마크 시스템**: `healthScore = 성공률*40 + 판정수락률*30 + (1-오탐률)*15 + 속도점수*15`
+- **Upstream 비교**: garrytan/gstack과 구조적 차이 비교 (스킬 수, Phase 수, 고유 기능)
+- **TypeScript API**: `lib/benchmark.ts`, `lib/upstream-compare.ts`, `lib/learned.ts` 전체 레퍼런스
+- **테스트**: 27개 테스트 전체 통과 (3개 테스트 파일)
+
+### 빠른 시작
+
+```bash
+# 클론 및 설치
+git clone https://github.com/ez2sarang/gstack-self-evolve.git
+cd gstack-self-evolve && bun install
+
+# 테스트 실행
+bun test test/evolve-loop.test.ts
+
+# 자율 진화 루프 (미리보기)
+bash bin/gstack-evolve-loop --dry-run --iterations 5
+
+# 실제 진화 루프 실행
+bash bin/gstack-evolve-loop --iterations 5
+```
+
+### 실제 결과
+
+5회 반복으로 시스템 건강 점수 54/100 -> 71/100 (+31% 개선) 달성.
+
+## Contact / 문의
+
+비즈니스 문의 및 협업 제안은 아래로 연락 부탁드립니다.
+
+**Email**: [sales@com.dooray.com](mailto:sales@com.dooray.com)
+
+기술적인 질문이나 버그 리포트는 [GitHub Issues](https://github.com/ez2sarang/gstack-self-evolve/issues)를 이용해 주세요.
+
 ## License
 
 MIT. Free forever. Go build something.
