@@ -11,16 +11,17 @@
 import { readFileSync, existsSync } from "fs";
 
 export interface TelemetryEvent {
-  v: number;
+  v?: number;
   ts: string;
   event_type?: string;
+  event?: string;
   skill: string;
   session_id?: string;
   gstack_version?: string;
   os?: string;
   arch?: string;
-  duration_s: number | null;
-  outcome: string;
+  duration_s?: number | null;
+  outcome?: string;
   error_class?: string | null;
   error_message?: string | null;
   failed_step?: string | null;
@@ -73,7 +74,7 @@ export function durationSigmoid(avgDurationS: number): number {
  * Compute health score for a single skill from its telemetry events.
  */
 export function computeSkillHealth(events: TelemetryEvent[], skill: string): SkillHealthScore {
-  const skillEvents = events.filter(e => e.skill === skill && e.skill !== "gstack");
+  const skillEvents = events.filter(e => e.skill === skill && e.skill !== "gstack" && e.event_type === "skill_run");
   const runCount = skillEvents.length;
 
   if (runCount === 0) {
@@ -120,7 +121,7 @@ export function computeSkillHealth(events: TelemetryEvent[], skill: string): Ski
  */
 export function computeSystemHealth(events: TelemetryEvent[]): SystemHealth {
   // Get unique skill names (exclude bare "gstack" preamble entries)
-  const skillNames = [...new Set(events.filter(e => e.skill && e.skill !== "gstack").map(e => e.skill))];
+  const skillNames = [...new Set(events.filter(e => e.skill && e.skill !== "gstack" && e.event_type === "skill_run").map(e => e.skill))];
 
   const skills = skillNames.map(name => computeSkillHealth(events, name)).filter(s => s.runCount > 0);
 

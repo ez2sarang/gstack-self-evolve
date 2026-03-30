@@ -36,7 +36,7 @@ afterEach(() => {
 describe("benchmark scoring", () => {
   test("all-success events score 85-100", () => {
     const events: TelemetryEvent[] = Array.from({ length: 10 }, (_, i) => ({
-      v: 1, ts: "2026-03-30T10:00:00Z", skill: "qa",
+      v: 1, ts: "2026-03-30T10:00:00Z", event_type: "skill_run", skill: "qa",
       session_id: `s${i}`, duration_s: 120, outcome: "success",
     }));
     const score = computeSkillHealth(events, "qa");
@@ -48,7 +48,7 @@ describe("benchmark scoring", () => {
 
   test("all-failure events score 0-15", () => {
     const events: TelemetryEvent[] = Array.from({ length: 10 }, (_, i) => ({
-      v: 1, ts: "2026-03-30T10:00:00Z", skill: "qa",
+      v: 1, ts: "2026-03-30T10:00:00Z", event_type: "skill_run", skill: "qa",
       session_id: `s${i}`, duration_s: 30, outcome: "error",
       error_class: "timeout",
     }));
@@ -58,13 +58,39 @@ describe("benchmark scoring", () => {
     expect(score.successRate).toBe(0);
   });
 
+  test("hook_fire events are excluded from health scoring", () => {
+    const events: TelemetryEvent[] = [
+      // 38 hook_fire events for careful (should be ignored)
+      ...Array.from({ length: 38 }, (_, i) => ({
+        skill: "careful", ts: "2026-03-30T10:00:00Z", event: "hook_fire", pattern: "rm_recursive",
+      } as TelemetryEvent)),
+      // 2 actual skill_run events for qa
+      { v: 1, ts: "2026-03-30T10:00:00Z", event_type: "skill_run", skill: "qa",
+        session_id: "s1", duration_s: 120, outcome: "success" },
+      { v: 1, ts: "2026-03-30T11:00:00Z", event_type: "skill_run", skill: "qa",
+        session_id: "s2", duration_s: 120, outcome: "success" },
+    ];
+    // careful should have 0 runs (hook_fire excluded)
+    const carefulScore = computeSkillHealth(events, "careful");
+    expect(carefulScore.runCount).toBe(0);
+    expect(carefulScore.healthScore).toBe(0);
+    // qa should have 2 runs
+    const qaScore = computeSkillHealth(events, "qa");
+    expect(qaScore.runCount).toBe(2);
+    expect(qaScore.successRate).toBe(1);
+    // system health should only include qa
+    const health = computeSystemHealth(events);
+    expect(health.skills.length).toBe(1);
+    expect(health.skills[0].skill).toBe("qa");
+  });
+
   test("mixed v:1/v:2 events handled correctly", () => {
     const events: TelemetryEvent[] = [
-      { v: 1, ts: "2026-03-30T10:00:00Z", skill: "review", session_id: "r1", duration_s: 200, outcome: "success" },
-      { v: 1, ts: "2026-03-30T11:00:00Z", skill: "review", session_id: "r2", duration_s: 180, outcome: "success" },
-      { v: 2, ts: "2026-03-30T12:00:00Z", skill: "review", session_id: "r3", duration_s: 210, outcome: "success",
+      { v: 1, ts: "2026-03-30T10:00:00Z", event_type: "skill_run", skill: "review", session_id: "r1", duration_s: 200, outcome: "success" },
+      { v: 1, ts: "2026-03-30T11:00:00Z", event_type: "skill_run", skill: "review", session_id: "r2", duration_s: 180, outcome: "success" },
+      { v: 2, ts: "2026-03-30T12:00:00Z", event_type: "skill_run", skill: "review", session_id: "r3", duration_s: 210, outcome: "success",
         bugs_found: 8, false_positives: 3, user_verdict: "modified" },
-      { v: 2, ts: "2026-03-30T13:00:00Z", skill: "review", session_id: "r4", duration_s: 190, outcome: "success",
+      { v: 2, ts: "2026-03-30T13:00:00Z", event_type: "skill_run", skill: "review", session_id: "r4", duration_s: 190, outcome: "success",
         bugs_found: 5, false_positives: 1, user_verdict: "accepted" },
     ];
     const score = computeSkillHealth(events, "review");
@@ -81,13 +107,13 @@ describe("benchmark scoring", () => {
     const events: TelemetryEvent[] = [
       // qa: 5 runs, all success, fast
       ...Array.from({ length: 5 }, (_, i) => ({
-        v: 1 as const, ts: "2026-03-30T10:00:00Z", skill: "qa",
+        v: 1 as const, ts: "2026-03-30T10:00:00Z", event_type: "skill_run" as const, skill: "qa",
         session_id: `q${i}`, duration_s: 60, outcome: "success",
       })),
       // review: 3 runs, 1 failure, slow
-      { v: 1, ts: "2026-03-30T10:00:00Z", skill: "review", session_id: "r1", duration_s: 500, outcome: "success" },
-      { v: 1, ts: "2026-03-30T11:00:00Z", skill: "review", session_id: "r2", duration_s: 500, outcome: "error" },
-      { v: 1, ts: "2026-03-30T12:00:00Z", skill: "review", session_id: "r3", duration_s: 500, outcome: "success" },
+      { v: 1, ts: "2026-03-30T10:00:00Z", event_type: "skill_run", skill: "review", session_id: "r1", duration_s: 500, outcome: "success" },
+      { v: 1, ts: "2026-03-30T11:00:00Z", event_type: "skill_run", skill: "review", session_id: "r2", duration_s: 500, outcome: "error" },
+      { v: 1, ts: "2026-03-30T12:00:00Z", event_type: "skill_run", skill: "review", session_id: "r3", duration_s: 500, outcome: "success" },
     ];
 
     const health = computeSystemHealth(events);
@@ -318,15 +344,15 @@ describe("evolve loop dry-run", () => {
     const analyticsDir = join(tmp, "analytics");
     mkdirSync(analyticsDir, { recursive: true });
 
-    // Create seed telemetry
+    // Create seed telemetry (event_type: "skill_run" required for health scoring)
     const lines = [
-      '{"v":1,"ts":"2026-03-28T10:00:00Z","skill":"qa","session_id":"s1","duration_s":120,"outcome":"success","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T11:00:00Z","skill":"qa","session_id":"s2","duration_s":30,"outcome":"error","error_class":"timeout","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T12:00:00Z","skill":"qa","session_id":"s3","duration_s":200,"outcome":"success","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T13:00:00Z","skill":"qa","session_id":"s4","duration_s":25,"outcome":"error","error_class":"timeout","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T14:00:00Z","skill":"review","session_id":"r1","duration_s":180,"outcome":"success","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T15:00:00Z","skill":"review","session_id":"r2","duration_s":200,"outcome":"success","source":"test"}',
-      '{"v":1,"ts":"2026-03-28T16:00:00Z","skill":"review","session_id":"r3","duration_s":15,"outcome":"error","error_class":"parse_error","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T10:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s1","duration_s":120,"outcome":"success","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T11:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s2","duration_s":30,"outcome":"error","error_class":"timeout","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T12:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s3","duration_s":200,"outcome":"success","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T13:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s4","duration_s":25,"outcome":"error","error_class":"timeout","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T14:00:00Z","event_type":"skill_run","skill":"review","session_id":"r1","duration_s":180,"outcome":"success","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T15:00:00Z","event_type":"skill_run","skill":"review","session_id":"r2","duration_s":200,"outcome":"success","source":"test"}',
+      '{"v":1,"ts":"2026-03-28T16:00:00Z","event_type":"skill_run","skill":"review","session_id":"r3","duration_s":15,"outcome":"error","error_class":"parse_error","source":"test"}',
     ];
     writeFileSync(join(analyticsDir, "skill-usage.jsonl"), lines.join("\n") + "\n");
     mkdirSync(join(tmp, "learned"), { recursive: true });
@@ -356,8 +382,8 @@ describe("evolve loop dry-run", () => {
     const analyticsDir = join(tmp, "analytics");
     mkdirSync(analyticsDir, { recursive: true });
     writeFileSync(join(analyticsDir, "skill-usage.jsonl"),
-      '{"v":1,"ts":"2026-03-28T10:00:00Z","skill":"qa","session_id":"s1","duration_s":120,"outcome":"success","source":"test"}\n' +
-      '{"v":1,"ts":"2026-03-28T11:00:00Z","skill":"qa","session_id":"s2","duration_s":30,"outcome":"error","error_class":"timeout","source":"test"}\n'
+      '{"v":1,"ts":"2026-03-28T10:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s1","duration_s":120,"outcome":"success","source":"test"}\n' +
+      '{"v":1,"ts":"2026-03-28T11:00:00Z","event_type":"skill_run","skill":"qa","session_id":"s2","duration_s":30,"outcome":"error","error_class":"timeout","source":"test"}\n'
     );
     mkdirSync(join(tmp, "learned"), { recursive: true });
 

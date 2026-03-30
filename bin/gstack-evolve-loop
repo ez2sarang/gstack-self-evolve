@@ -85,7 +85,7 @@ find_top_opportunity() {
   # Use bun to compute opportunities
   bun -e "
     const { parseTelemetryFile, computeSkillHealth } = require('$GSTACK_DIR/lib/benchmark.ts');
-    const events = parseTelemetryFile('$file');
+    const events = parseTelemetryFile('$file').filter(e => e.event_type === 'skill_run');
     const skills = [...new Set(events.filter(e => e.skill && e.skill !== 'gstack').map(e => e.skill))];
     const skip = new Set(${skip_skills:+"['${skip_skills[*]// /','}']"});
     const scored = skills
@@ -107,16 +107,22 @@ apply_evolve_change() {
   local skill="$1"
   local iteration="$2"
 
-  # Read failure data for this skill
+  # Read failure data for this skill (only count skill_run events, not hook_fire)
   local failure_count
-  failure_count=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"outcome":"error"' | wc -l | tr -d ' ')
+  failure_count=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"event_type":"skill_run"' | grep '"outcome":"error"' | wc -l | tr -d ' ')
   local total_count
-  total_count=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | wc -l | tr -d ' ')
+  total_count=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"event_type":"skill_run"' | wc -l | tr -d ' ')
 
   # Extract common error class
   local top_error
-  top_error=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"outcome":"error"' | \
+  top_error=$(grep "\"skill\":\"$skill\"" "$TELEMETRY_FILE" 2>/dev/null | grep '"event_type":"skill_run"' | grep '"outcome":"error"' | \
     grep -o '"error_class":"[^"]*"' | sort | uniq -c | sort -rn | head -1 | awk -F'"' '{print $4}')
+
+  # Skip if no actual skill_run failures exist for this skill
+  if [ "$failure_count" -eq 0 ] && [ "$total_count" -eq 0 ]; then
+    echo "SKIP_NO_DATA"
+    return
+  fi
 
   [ -z "$top_error" ] && top_error="general_failure"
 
@@ -401,6 +407,14 @@ for ITER in $(seq 1 "$MAX_ITERATIONS"); do
 
   # Apply change
   CHANGE_DESC=$(apply_evolve_change "$TARGET" "$ITER")
+
+  # Skip if no skill_run data exists for this target
+  if [ "$CHANGE_DESC" = "SKIP_NO_DATA" ]; then
+    print_iteration_report "$ITER" "$MAX_ITERATIONS" "$TARGET" "SKIPPED: no skill_run data for /$TARGET" \
+      "$PRE_SYSTEM" "$PRE_SYSTEM" "$PRE_SKILL" "$PRE_SKILL" "NO_DATA" "$CONVERGE_COUNT"
+    SKIP_SKILLS="$SKIP_SKILLS $TARGET"
+    continue
+  fi
 
   # Post-health
   POST_SYSTEM=$(compute_health "$TELEMETRY_FILE")
