@@ -170,7 +170,7 @@ apply_evolve_change() {
       local apply_script="$GSTACK_DIR/bin/gstack-evolve-apply"
       if [ -x "$apply_script" ]; then
         "$apply_script" --skill "$skill" --patch-id "$pattern_id" \
-          --content "$markdown_content" --confidence "0.85" 2>/dev/null || true
+          --content "$markdown_content" --confidence "0.85" >&2 2>/dev/null || true
       fi
     fi
   fi
@@ -439,10 +439,9 @@ for ITER in $(seq 1 "$MAX_ITERATIONS"); do
 
     # Rollback: remove the patch that didn't help
     if [ "$DRY_RUN" = "false" ]; then
-      local last_patch_id
-      last_patch_id=$(grep "\"skill\":\"$TARGET\"" "$LEARNED_PATTERNS" 2>/dev/null | tail -1 | grep -o '"id":"[^"]*"' | awk -F'"' '{print $4}')
-      if [ -n "$last_patch_id" ] && [ -x "$GSTACK_DIR/bin/gstack-evolve-apply" ]; then
-        "$GSTACK_DIR/bin/gstack-evolve-apply" --remove "$last_patch_id" --skill "$TARGET" 2>/dev/null || true
+      _LAST_PATCH_ID=$(grep "\"skill\":\"$TARGET\"" "$LEARNED_PATTERNS" 2>/dev/null | tail -1 | grep -o '"id":"[^"]*"' | awk -F'"' '{print $4}')
+      if [ -n "$_LAST_PATCH_ID" ] && [ -x "$GSTACK_DIR/bin/gstack-evolve-apply" ]; then
+        "$GSTACK_DIR/bin/gstack-evolve-apply" --remove "$_LAST_PATCH_ID" --skill "$TARGET" 2>/dev/null || true
       fi
     fi
   else
